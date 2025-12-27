@@ -14,10 +14,30 @@ const JWT_SECRET = 'super_secret_ludo_key_123';
 app.use(cors());
 app.use(express.json());
 
-// Database Connection
-mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+// Database Connection - FIXED VERSION
+mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB connected successfully'))
-    .catch(err => console.error('MongoDB connection error:', err));
+    .catch(err => {
+        console.error('MongoDB connection error:', err.message);
+        console.log('Trying alternative connection method...');
+        
+        // Try alternative connection
+        mongoose.connect(MONGO_URI, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        })
+        .then(() => console.log('MongoDB connected via alternative method'))
+        .catch(err2 => console.error('Alternative connection also failed:', err2.message));
+    });
+
+// MongoDB connection events
+mongoose.connection.on('error', err => {
+    console.error('MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+    console.log('MongoDB disconnected');
+});
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -37,8 +57,8 @@ const gameSchema = new mongoose.Schema({
     gameCode: { type: String, unique: true, required: true },
     players: [{
         playerId: String,
-        username: String, // Custom name entered by player
-        displayName: String, // Name shown in game (can be different)
+        username: String,
+        displayName: String,
         isVIP: Boolean,
         position: { type: Number, default: 0 },
         dice: { type: Number, default: 0 },
@@ -53,7 +73,7 @@ const gameSchema = new mongoose.Schema({
 
 const Game = mongoose.model('Game', gameSchema);
 
-// VIP Dice Logic (same as before)
+// VIP Dice Logic
 const calculateVIPDice = (gameState, vipPlayer) => {
     const positions = gameState.players.map(p => p.position);
     const vipPosition = vipPlayer.position;
@@ -106,7 +126,7 @@ const authenticateToken = (req, res, next) => {
 
 // Routes
 
-// 1. Quick Registration with Name (Simplified)
+// 1. Quick Registration
 app.post('/api/quick-register', async (req, res) => {
     try {
         const { displayName, code } = req.body;
@@ -115,14 +135,13 @@ app.post('/api/quick-register', async (req, res) => {
             return res.status(400).json({ error: 'Display name and code required' });
         }
         
-        // Check if VIP code
         const vipCodes = ['VIP123', 'VIPCODE', 'ALWAYSWIN', 'WINNER', 'SPECIAL'];
         const isVIP = vipCodes.includes(code.toUpperCase());
         
         const playerId = 'PLAYER_' + uuidv4().substring(0, 8).toUpperCase();
         
         const newUser = new User({
-            username: displayName, // Use display name as username
+            username: displayName,
             playerId,
             code,
             isVIP
@@ -147,11 +166,12 @@ app.post('/api/quick-register', async (req, res) => {
             }
         });
     } catch (error) {
-        res.status(500).json({ error: 'Registration failed', details: error.message });
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'Registration failed' });
     }
 });
 
-// 2. Create Game (Host enters their name)
+// 2. Create Game
 app.post('/api/game/create', authenticateToken, async (req, res) => {
     try {
         const { displayName } = req.body;
@@ -167,7 +187,7 @@ app.post('/api/game/create', authenticateToken, async (req, res) => {
             players: [{
                 playerId: req.user.playerId,
                 username: req.user.username,
-                displayName: displayName || req.user.username, // Use provided display name
+                displayName: displayName || req.user.username,
                 isVIP: req.user.isVIP,
                 position: 0
             }]
@@ -182,11 +202,12 @@ app.post('/api/game/create', authenticateToken, async (req, res) => {
             message: 'Game created successfully'
         });
     } catch (error) {
+        console.error('Game creation error:', error);
         res.status(500).json({ error: 'Game creation failed' });
     }
 });
 
-// 3. Join Game with Custom Name (NEW IMPROVED VERSION)
+// 3. Join Game
 app.post('/api/game/join', authenticateToken, async (req, res) => {
     try {
         const { gameCode, displayName } = req.body;
@@ -196,7 +217,7 @@ app.post('/api/game/join', authenticateToken, async (req, res) => {
         }
         
         if (!displayName) {
-            return res.status(400).json({ error: 'Display name required to join game' });
+            return res.status(400).json({ error: 'Display name required' });
         }
         
         const game = await Game.findOne({ gameCode, isActive: true });
@@ -208,18 +229,16 @@ app.post('/api/game/join', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Game is full (max 4 players)' });
         }
         
-        // Check if name is already taken in this game
         const nameTaken = game.players.some(p => 
             p.displayName.toLowerCase() === displayName.toLowerCase()
         );
         
         if (nameTaken) {
             return res.status(400).json({ 
-                error: 'Name already taken in this game. Choose a different name.' 
+                error: 'Name already taken in this game' 
             });
         }
         
-        // Check if player already joined (by playerId)
         const alreadyJoined = game.players.some(p => p.playerId === req.user.playerId);
         if (alreadyJoined) {
             return res.status(400).json({ error: 'You already joined this game' });
@@ -228,7 +247,7 @@ app.post('/api/game/join', authenticateToken, async (req, res) => {
         game.players.push({
             playerId: req.user.playerId,
             username: req.user.username,
-            displayName: displayName, // Custom name for this game
+            displayName: displayName,
             isVIP: req.user.isVIP,
             position: 0
         });
@@ -241,17 +260,17 @@ app.post('/api/game/join', authenticateToken, async (req, res) => {
             displayName,
             players: game.players.map(p => ({
                 displayName: p.displayName,
-                position: p.position,
-                isVIP: p.playerId === req.user.playerId ? p.isVIP : undefined
+                position: p.position
             })),
             message: 'Joined game successfully'
         });
     } catch (error) {
+        console.error('Join game error:', error);
         res.status(500).json({ error: 'Join game failed' });
     }
 });
 
-// 4. Roll Dice (updated to use displayName)
+// 4. Roll Dice
 app.post('/api/game/roll', authenticateToken, async (req, res) => {
     try {
         const { gameCode } = req.body;
@@ -267,17 +286,18 @@ app.post('/api/game/roll', authenticateToken, async (req, res) => {
         }
         
         const allDiceInside = currentPlayer.position === 0;
-        
         let diceValue;
         
         if (currentPlayer.isVIP) {
             diceValue = calculateVIPDice(game, currentPlayer);
+            console.log(`VIP ${currentPlayer.displayName} rolled strategic dice: ${diceValue}`);
         } else {
             diceValue = getNormalDice();
             
             if (allDiceInside) {
                 if (Math.random() < 0.7) {
                     diceValue = 6;
+                    console.log(`Normal player ${currentPlayer.displayName} got quick start: ${diceValue}`);
                 }
             }
         }
@@ -286,8 +306,10 @@ app.post('/api/game/roll', authenticateToken, async (req, res) => {
         
         if (currentPlayer.position >= 100) {
             currentPlayer.position = 100;
-            game.winner = currentPlayer.displayName; // Use display name for winner
+            game.winner = currentPlayer.displayName;
             game.isActive = false;
+            
+            console.log(`🎉 ${currentPlayer.displayName} WINS THE GAME!`);
             
             await User.findOneAndUpdate(
                 { playerId: currentPlayer.playerId },
@@ -312,7 +334,7 @@ app.post('/api/game/roll', authenticateToken, async (req, res) => {
         res.json({
             success: true,
             diceValue,
-            player: currentPlayer.displayName, // Return display name
+            player: currentPlayer.displayName,
             position: currentPlayer.position,
             isVIP: currentPlayer.isVIP,
             nextTurn: game.players[game.currentTurn].displayName,
@@ -320,11 +342,12 @@ app.post('/api/game/roll', authenticateToken, async (req, res) => {
             winner: game.winner
         });
     } catch (error) {
+        console.error('Dice roll error:', error);
         res.status(500).json({ error: 'Dice roll failed' });
     }
 });
 
-// 5. Get Game State (shows all display names)
+// 5. Get Game State
 app.get('/api/game/:gameCode', authenticateToken, async (req, res) => {
     try {
         const game = await Game.findOne({ 
@@ -350,39 +373,12 @@ app.get('/api/game/:gameCode', authenticateToken, async (req, res) => {
             winner: game.winner
         });
     } catch (error) {
+        console.error('Get game error:', error);
         res.status(500).json({ error: 'Failed to get game state' });
     }
 });
 
-// 6. Check if Name Available in Game
-app.post('/api/game/check-name', async (req, res) => {
-    try {
-        const { gameCode, displayName } = req.body;
-        
-        if (!gameCode || !displayName) {
-            return res.status(400).json({ error: 'Game code and display name required' });
-        }
-        
-        const game = await Game.findOne({ gameCode });
-        
-        if (!game) {
-            return res.json({ available: true, message: 'Game not found, name available' });
-        }
-        
-        const nameTaken = game.players.some(p => 
-            p.displayName.toLowerCase() === displayName.toLowerCase()
-        );
-        
-        res.json({
-            available: !nameTaken,
-            message: nameTaken ? 'Name already taken' : 'Name available'
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Check failed' });
-    }
-});
-
-// 7. Quick Join with Name and Code (All-in-one endpoint)
+// 6. Quick Join
 app.post('/api/quick-join', async (req, res) => {
     try {
         const { gameCode, displayName, playerCode } = req.body;
@@ -393,14 +389,11 @@ app.post('/api/quick-join', async (req, res) => {
             });
         }
         
-        // Check if VIP code
         const vipCodes = ['VIP123', 'VIPCODE', 'ALWAYSWIN', 'WINNER', 'SPECIAL'];
         const isVIP = vipCodes.includes(playerCode.toUpperCase());
         
-        // Generate player ID
         const playerId = 'PLAYER_' + uuidv4().substring(0, 8).toUpperCase();
         
-        // Find or create user
         let user = await User.findOne({ code: playerCode });
         if (!user) {
             user = new User({
@@ -412,7 +405,6 @@ app.post('/api/quick-join', async (req, res) => {
             await user.save();
         }
         
-        // Find game
         const game = await Game.findOne({ gameCode, isActive: true });
         if (!game) {
             return res.status(404).json({ error: 'Game not found or inactive' });
@@ -422,7 +414,6 @@ app.post('/api/quick-join', async (req, res) => {
             return res.status(400).json({ error: 'Game is full (max 4 players)' });
         }
         
-        // Check if name is taken
         const nameTaken = game.players.some(p => 
             p.displayName.toLowerCase() === displayName.toLowerCase()
         );
@@ -433,7 +424,6 @@ app.post('/api/quick-join', async (req, res) => {
             });
         }
         
-        // Join game
         game.players.push({
             playerId: user.playerId,
             username: user.username,
@@ -444,7 +434,6 @@ app.post('/api/quick-join', async (req, res) => {
         
         await game.save();
         
-        // Create token
         const token = jwt.sign(
             { userId: user._id, playerId: user.playerId, username: displayName, isVIP },
             JWT_SECRET,
@@ -464,12 +453,51 @@ app.post('/api/quick-join', async (req, res) => {
             message: 'Joined game successfully'
         });
     } catch (error) {
-        res.status(500).json({ error: 'Quick join failed', details: error.message });
+        console.error('Quick join error:', error);
+        res.status(500).json({ error: 'Quick join failed' });
     }
+});
+
+// 7. Test endpoint
+app.get('/api/test', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Ludo Backend is running!',
+        endpoints: [
+            'POST /api/quick-register',
+            'POST /api/game/create',
+            'POST /api/game/join', 
+            'POST /api/game/roll',
+            'GET /api/game/:gameCode',
+            'POST /api/quick-join',
+            'GET /api/test'
+        ]
+    });
+});
+
+// 8. Health check
+app.get('/api/health', (req, res) => {
+    const dbStatus = mongoose.connection.readyState;
+    const statusText = dbStatus === 1 ? 'connected' : 'disconnected';
+    
+    res.json({
+        success: dbStatus === 1,
+        message: `Server is running. MongoDB: ${statusText}`,
+        timestamp: new Date().toISOString(),
+        vipCodes: ['VIP123', 'VIPCODE', 'ALWAYSWIN', 'WINNER', 'SPECIAL']
+    });
 });
 
 // Start Server
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`VIP Codes: VIP123, VIPCODE, ALWAYSWIN, WINNER, SPECIAL`);
+    console.log(`
+╔══════════════════════════════════════════╗
+║     LUDO BACKEND SERVER IS RUNNING       ║
+╠══════════════════════════════════════════╣
+║ Port: ${PORT}                            ║
+║ MongoDB: Connecting...                   ║
+║ VIP Codes: VIP123, VIPCODE, ALWAYSWIN    ║
+║ Test: http://localhost:${PORT}/api/test  ║
+╚══════════════════════════════════════════╝
+    `);
 });
