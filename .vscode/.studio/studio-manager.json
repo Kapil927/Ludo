@@ -1,0 +1,29 @@
+{
+  "rules": [
+    {
+      "condition": "always",
+      "commandType": "vscode",
+      "command": "studio-manager.openFile src/app.js 1"
+    },
+    {
+      "condition": "always",
+      "commandType": "vscode",
+      "command": "studio-manager.openSimpleBrowser https://${STUDIO_HOST_ID}-3000.${STUDIO_HOST}",
+      "delay": 2500
+    },
+    {
+      "condition": "always",
+      "commandType": "vscode",
+      "command": "studio-manager.openTerminal",
+      "cmdArgs": [
+        "npm install && npm run dev",
+        {
+          "name": "nodejs",
+          "location": 1
+        }
+      ],
+      "delay": 200
+    }
+  ],
+  "simpleBrowserDefaultAppUrl": "https://${STUDIO_HOST_ID}-3000.${STUDIO_HOST}"
+}
