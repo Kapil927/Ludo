@@ -16,14 +16,13 @@ app.use(cors({
 app.use(express.json());
 
 // Connect to MongoDB
-mongoose.connect('mongodb://user_448rkyjdg:p448rkyjdg@bytexldb.com:5050/db_448rkyjdg', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
-  console.log('✅ MongoDB Connected');
-}).catch(err => {
-  console.log('❌ MongoDB Error:', err);
-});
+mongoose.connect('mongodb://user_448rkyjdg:p448rkyjdg@bytexldb.com:5050/db_448rkyjdg')
+  .then(() => {
+    console.log('✅ MongoDB Connected Successfully');
+  })
+  .catch(err => {
+    console.log('❌ MongoDB Connection Error:', err.message);
+  });
 
 // ========== MODELS ==========
 
