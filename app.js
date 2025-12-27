@@ -4,7 +4,6 @@ const dotenv = require('dotenv');
 const http = require('http');
 const socketIo = require('socket.io');
 const connectDB = require('./config/db');
-const authController = require('./controllers/authController');
 
 // Load environment variables
 dotenv.config();
@@ -13,9 +12,9 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-// CORS Configuration - ALLOW ALL ORIGINS FOR NOW
+// CORS Configuration
 app.use(cors({
-  origin: '*',  // Allow all origins
+  origin: '*',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
@@ -30,23 +29,15 @@ app.use(express.json());
 // Database Connection
 connectDB().then(async () => {
   console.log('Database connected successfully');
-  
-  // Initialize predefined users after DB connection
-  try {
-    await authController.initializeUsers();
-    console.log('Predefined users initialized');
-  } catch (err) {
-    console.error('Failed to initialize users:', err);
-  }
 }).catch(err => {
   console.error('Database connection failed:', err);
   process.exit(1);
 });
 
-// Routes
-app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api/game', require('./routes/gameRoutes'));
-app.use('/api/dice', require('./routes/diceRoutes'));
+// Routes - UPDATED TO MATCH YOUR FILENAMES
+app.use('/api/auth', require('./routes/auth'));      // Changed
+app.use('/api/game', require('./routes/game'));      // Changed
+app.use('/api/dice', require('./routes/dice'));      // Changed
 
 // Health check route
 app.get('/health', (req, res) => {
@@ -71,30 +62,9 @@ app.get('/', (req, res) => {
   });
 });
 
-// Socket.IO Configuration
-const io = socketIo(server, {
-  cors: {
-    origin: '*',  // Allow all origins
-    methods: ["GET", "POST"],
-    credentials: true
-  }
-});
-
-// Socket.IO for real-time game updates
-io.on('connection', (socket) => {
-  console.log('New client connected:', socket.id);
-  
-  // ... rest of your socket.io code ...
-});
-
 // Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Server error:', err.stack);
-  res.status(500).json({ 
-    success: false,
-    error: 'Internal server error'
-  });
-});
+const errorHandler = require('./middleware/error');
+app.use(errorHandler);
 
 // 404 handler
 app.use((req, res) => {
@@ -114,9 +84,8 @@ server.listen(PORT, () => {
     📡 Server running on port: ${PORT}
     🌍 CORS: Enabled for all origins
     🗄️  Database: Connected
-    ⚡ Real-time: Socket.IO enabled
     ========================================
   `);
 });
 
-module.exports = { app, io };
+module.exports = app;
