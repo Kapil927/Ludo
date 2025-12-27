@@ -14,31 +14,34 @@ const JWT_SECRET = 'super_secret_ludo_key_123';
 app.use(cors());
 app.use(express.json());
 
-// Database Connection - FIXED VERSION
-mongoose.connect(MONGO_URI)
-    .then(() => console.log('MongoDB connected successfully'))
-    .catch(err => {
-        console.error('MongoDB connection error:', err.message);
-        console.log('Trying alternative connection method...');
-        
-        // Try alternative connection
-        mongoose.connect(MONGO_URI, {
-            serverSelectionTimeoutMS: 5000,
-            socketTimeoutMS: 45000,
-        })
-        .then(() => console.log('MongoDB connected via alternative method'))
-        .catch(err2 => console.error('Alternative connection also failed:', err2.message));
+// Middleware with proper CORS for production
+app.use(cors({
+  origin: ['https://kgwtenqptmapjtke-3000.ws2.app'],
+  credentials: true
+}));
+app.use(express.json());
+
+// Database Connection with better error handling
+const connectDB = async () => {
+  try {
+    await mongoose.connect(MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      retryWrites: true,
+      w: 'majority'
     });
-
-// MongoDB connection events
-mongoose.connection.on('error', err => {
-    console.error('MongoDB connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-    console.log('MongoDB disconnected');
-});
-
+    console.log('✅ MongoDB connected successfully');
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error.message);
+    console.log('⚠️  Application running in offline mode (games won\'t persist)');
+    
+    // You can comment this out for testing without DB
+    // process.exit(1);
+  }
+};
 // User Schema
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true },
