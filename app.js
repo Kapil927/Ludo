@@ -11,8 +11,15 @@ const errorHandler = require('./middleware/error');
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// 🔥 CORS FIX
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.options('*', cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -20,8 +27,7 @@ app.use(express.urlencoded({ extended: true }));
 mongoose.connect(process.env.MONGO_URI)
 .then(() => console.log('MongoDB connected successfully'))
 .catch(err => {
-    console.error('MongoDB connection error:', err.message);
-    console.log('Connection string format:', process.env.MONGO_URI ? 'Present' : 'Missing');
+  console.error('MongoDB connection error:', err.message);
 });
 
 // Routes
@@ -29,26 +35,19 @@ app.use('/api/auth', authRoutes);
 app.use('/api/game', gameRoutes);
 app.use('/api/dice', diceRoutes);
 
-// Basic route
-// Basic route
+// Test route
 app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Ludo API is running',
-        version: '1.0.0',
-        features: 'VIP cheating logic enabled',
-        endpoints: {
-            auth: '/api/auth',
-            game: '/api/game',
-            dice: '/api/dice'
-        }
-    });
+  res.json({
+    message: 'Ludo API is running',
+    version: '1.0.0',
+    features: 'VIP cheating logic enabled'
+  });
 });
 
-// Error handling middleware
+// Error handling
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`VIP User ID: ${process.env.VIP_USER_ID || 'vip_player_001'}`);
+  console.log(`Server running on port ${PORT}`);
 });
