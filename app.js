@@ -6,70 +6,207 @@ const cors = require('cors');
 
 const app = express();
 
-// CORS - Allow all origins
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
+// Middleware
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Connect to MongoDB
+// MongoDB Connection
 mongoose.connect('mongodb://user_448rkyjdg:p448rkyjdg@bytexldb.com:5050/db_448rkyjdg')
-  .then(() => {
-    console.log('✅ MongoDB Connected Successfully');
-  })
-  .catch(err => {
-    console.log('❌ MongoDB Connection Error:', err.message);
-  });
+  .then(() => console.log('✅ MongoDB Connected'))
+  .catch(err => console.log('❌ MongoDB Error:', err));
 
 // ========== MODELS ==========
-
-// User Model
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  displayName: { type: String, required: true },
-  password: { type: String, required: true },
-  isVIP: { type: Boolean, default: false },
+const User = mongoose.model('User', new mongoose.Schema({
+  username: { type: String, unique: true },
+  displayName: String,
+  password: String,
+  isVIP: Boolean,
   totalGames: { type: Number, default: 0 },
   wins: { type: Number, default: 0 },
   losses: { type: Number, default: 0 },
   winRate: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
-});
+}));
 
-// Game Model
-const gameSchema = new mongoose.Schema({
-  gameId: { type: String, required: true, unique: true },
-  players: [{
-    userId: String,
-    username: String,
-    displayName: String,
-    isVIP: Boolean,
-    color: String,
-    pieces: [{
-      id: Number,
-      position: Number,
-      isHome: Boolean,
-      isSafe: Boolean,
-      isFinished: Boolean
-    }],
-    diceValue: Number,
-    hasTurn: Boolean
-  }],
+const Game = mongoose.model('Game', new mongoose.Schema({
+  gameId: String,
+  players: Array,
   currentTurn: { type: Number, default: 0 },
   gameState: { type: String, default: 'waiting' },
-  winner: { userId: String, username: String },
-  settings: {
-    maxPlayers: { type: Number, default: 4 },
-    enableVIP: { type: Boolean, default: true }
-  },
+  winner: Object,
+  settings: Object,
+  lastActivity: { type: Date, default: Date.now },
+  turnTimer: { type: Number, default: 30 }, // 30 seconds per turn
+  autoPlay: { type: Boolean, default: true }, // Auto-play for inactive players
   createdAt: { type: Date, default: Date.now }
-});
+}));
 
-const User = mongoose.model('User', userSchema);
-const Game = mongoose.model('Game', gameSchema);
+// ========== GAME CONSTANTS ==========
+const VIP_PASSWORD = 'winning123';
+const TURN_TIME_LIMIT = 30; // seconds
+const AUTO_PLAY_DELAY = 10; // seconds before auto-play kicks in
+const MAX_TURN_TIME = 45; // maximum seconds per turn
+
+// Store active timers for games
+const gameTimers = new Map();
+
+// ========== HELPER FUNCTIONS ==========
+const createDefaultUsers = async () => {
+  try {
+    console.log('📝 Creating default users...');
+    
+    const defaultUsers = [
+      { username: 'player1', displayName: 'Player One', password: 'player123', isVIP: false },
+      { username: 'player2', displayName: 'Player Two', password: 'player123', isVIP: false },
+      { username: 'player3', displayName: 'Player Three', password: 'player123', isVIP: false },
+      { username: 'player4', displayName: 'Player Four', password: 'player123', isVIP: false }
+    ];
+    
+    for (const userData of defaultUsers) {
+      const exists = await User.findOne({ username: userData.username });
+      
+      if (!exists) {
+        const hashedPassword = await bcrypt.hash(userData.password, 10);
+        await User.create({
+          username: userData.username,
+          displayName: userData.displayName,
+          password: hashedPassword,
+          isVIP: userData.isVIP
+        });
+        console.log(`   Created default: ${userData.username}`);
+      }
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Default user creation failed:', error);
+    return false;
+  }
+};
+
+// Auto-play function for inactive players
+const autoPlayTurn = async (gameId) => {
+  try {
+    const game = await Game.findOne({ gameId });
+    
+    if (!game || game.gameState !== 'active') {
+      clearTimer(gameId);
+      return;
+    }
+    
+    const currentPlayer = game.players[game.currentTurn % game.players.length];
+    
+    console.log(`⏰ Auto-playing for ${currentPlayer.displayName} in game ${gameId}`);
+    
+    // Auto-roll dice
+    let diceValue;
+    if (currentPlayer.isVIP) {
+      const roll = Math.random();
+      if (roll < 0.4) diceValue = 6;
+      else if (roll < 0.7) diceValue = Math.floor(Math.random() * 3) + 4;
+      else diceValue = Math.floor(Math.random() * 6) + 1;
+    } else {
+      diceValue = Math.floor(Math.random() * 6) + 1;
+    }
+    
+    currentPlayer.diceValue = diceValue;
+    
+    // Auto-choose best move for VIP, random for others
+    const validPieces = currentPlayer.pieces.filter(p => 
+      !p.isFinished && (p.position === -1 ? diceValue === 6 : true)
+    );
+    
+    if (validPieces.length > 0) {
+      let pieceId;
+      if (currentPlayer.isVIP) {
+        // VIP chooses piece closest to finish
+        pieceId = validPieces.reduce((best, piece) => 
+          piece.position > best.position ? piece : best
+        ).id;
+      } else {
+        // Random piece for normal players
+        pieceId = validPieces[Math.floor(Math.random() * validPieces.length)].id;
+      }
+      
+      // Make the move
+      const piece = currentPlayer.pieces[pieceId];
+      if (piece.position === -1 && diceValue === 6) {
+        piece.position = 0;
+        piece.isHome = false;
+      } else if (piece.position >= 0) {
+        piece.position += diceValue;
+        if (piece.position >= 52) {
+          piece.isFinished = true;
+          piece.position = 100;
+        }
+      }
+    }
+    
+    // Clear dice and move to next turn
+    currentPlayer.diceValue = null;
+    
+    // Check for winner
+    const allFinished = currentPlayer.pieces.every(p => p.isFinished);
+    if (allFinished) {
+      game.gameState = 'finished';
+      game.winner = {
+        userId: currentPlayer.userId,
+        username: currentPlayer.username,
+        displayName: currentPlayer.displayName
+      };
+      
+      // Update stats
+      await User.updateOne(
+        { _id: currentPlayer.userId },
+        { $inc: { totalGames: 1, wins: 1 } }
+      );
+      
+      game.players.forEach(async (player) => {
+        if (player.userId !== currentPlayer.userId) {
+          await User.updateOne(
+            { _id: player.userId },
+            { $inc: { totalGames: 1, losses: 1 } }
+          );
+        }
+      });
+      
+      clearTimer(gameId);
+    } else {
+      game.currentTurn++;
+      game.lastActivity = new Date();
+      await game.save();
+      
+      // Start timer for next player
+      startTurnTimer(gameId);
+    }
+    
+    await game.save();
+    
+  } catch (error) {
+    console.error('Auto-play error:', error);
+  }
+};
+
+// Timer management functions
+const startTurnTimer = (gameId) => {
+  clearTimer(gameId);
+  
+  const timer = setTimeout(() => {
+    autoPlayTurn(gameId);
+  }, TURN_TIME_LIMIT * 1000);
+  
+  gameTimers.set(gameId, timer);
+};
+
+const clearTimer = (gameId) => {
+  if (gameTimers.has(gameId)) {
+    clearTimeout(gameTimers.get(gameId));
+    gameTimers.delete(gameId);
+  }
+};
+
+// Create default users when server starts
+createDefaultUsers();
 
 // ========== ROUTES ==========
 
@@ -77,56 +214,84 @@ const Game = mongoose.model('Game', gameSchema);
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'LUDO Game API is running',
-    timestamp: new Date().toISOString()
+    message: 'LUDO API is running',
+    features: ['Fast-paced gameplay', 'Auto-play', 'Time limits', 'VIP system'],
+    turnTimeLimit: TURN_TIME_LIMIT + ' seconds'
   });
 });
 
-// 2. Initialize Users
-app.get('/api/auth/init', async (req, res) => {
+// 2. User Registration
+app.post('/api/auth/register', async (req, res) => {
   try {
-    console.log('Initializing users...');
+    const { username, displayName, password } = req.body;
     
-    const users = [
-      { username: 'player1', displayName: 'Player One', password: 'player123', isVIP: false },
-      { username: 'player2', displayName: 'Player Two', password: 'player123', isVIP: false },
-      { username: 'player3', displayName: 'Player Three', password: 'player123', isVIP: false },
-      { username: 'player4', displayName: 'Player Four', password: 'player123', isVIP: false },
-      { username: 'friend', displayName: 'My Friend', password: 'friend123', isVIP: true }
-    ];
-
-    for (const userData of users) {
-      const existingUser = await User.findOne({ username: userData.username });
-      
-      if (!existingUser) {
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(userData.password, salt);
-        
-        const user = new User({
-          username: userData.username,
-          displayName: userData.displayName,
-          password: hashedPassword,
-          isVIP: userData.isVIP
-        });
-        
-        await user.save();
-        console.log(`✅ Created user: ${userData.username}`);
-      } else {
-        console.log(`ℹ️ User already exists: ${userData.username}`);
-      }
+    console.log(`📝 Registration: ${username} (${displayName})`);
+    
+    if (!username || !displayName || !password) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'All fields are required' 
+      });
     }
     
-    res.json({ 
-      success: true, 
-      message: 'Users initialized successfully',
-      totalUsers: await User.countDocuments()
+    if (username.length < 3) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Username must be at least 3 characters' 
+      });
+    }
+    
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Username already taken' 
+      });
+    }
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const isVIP = (password === VIP_PASSWORD);
+    
+    const user = new User({
+      username,
+      displayName,
+      password: hashedPassword,
+      isVIP,
+      totalGames: 0,
+      wins: 0,
+      losses: 0,
+      winRate: 0
+    });
+    
+    await user.save();
+    
+    console.log(`✅ User registered: ${username} (VIP: ${isVIP})`);
+    
+    const token = jwt.sign(
+      { userId: user._id, username: user.username },
+      'super_secret_ludo_key_123',
+      { expiresIn: '7d' }
+    );
+    
+    res.json({
+      success: true,
+      message: 'Registration successful!',
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        displayName: user.displayName,
+        isVIP: user.isVIP,
+        stats: { totalGames: 0, wins: 0, losses: 0, winRate: 0 }
+      },
+      vipHint: isVIP ? '🎉 You are a VIP player!' : `Use "${VIP_PASSWORD}" to become VIP`
     });
     
   } catch (error) {
-    console.error('Error initializing users:', error);
+    console.error('Registration error:', error);
     res.status(500).json({ 
-      success: false, 
-      error: error.message 
+      success: false,
+      error: 'Server error' 
     });
   }
 });
@@ -136,12 +301,12 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     
-    console.log('Login attempt for:', username);
+    console.log(`🔐 Login: ${username}`);
     
     if (!username || !password) {
       return res.status(400).json({ 
         success: false,
-        error: 'Username and password are required' 
+        error: 'Username and password required' 
       });
     }
     
@@ -150,7 +315,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (!user) {
       return res.status(400).json({ 
         success: false,
-        error: 'User not found. Please initialize users first.' 
+        error: 'User not found. Please register first.' 
       });
     }
     
@@ -169,6 +334,8 @@ app.post('/api/auth/login', async (req, res) => {
       { expiresIn: '7d' }
     );
     
+    console.log(`✅ Login successful: ${username} (VIP: ${user.isVIP})`);
+    
     res.json({
       success: true,
       token,
@@ -178,10 +345,10 @@ app.post('/api/auth/login', async (req, res) => {
         displayName: user.displayName,
         isVIP: user.isVIP,
         stats: {
-          totalGames: user.totalGames,
-          wins: user.wins,
-          losses: user.losses,
-          winRate: user.winRate
+          totalGames: user.totalGames || 0,
+          wins: user.wins || 0,
+          losses: user.losses || 0,
+          winRate: user.winRate || 0
         }
       }
     });
@@ -195,61 +362,13 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// 4. Get All Users
-app.get('/api/auth/users', async (req, res) => {
-  try {
-    const users = await User.find({}, 'username displayName isVIP totalGames wins winRate');
-    res.json({ success: true, users });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// 5. Get User Profile
-app.get('/api/auth/profile', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-    
-    const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
-    const user = await User.findById(decoded.userId);
-    
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-    
-    res.json({
-      success: true,
-      user: {
-        id: user._id,
-        username: user.username,
-        displayName: user.displayName,
-        isVIP: user.isVIP,
-        stats: {
-          totalGames: user.totalGames,
-          wins: user.wins,
-          losses: user.losses,
-          winRate: user.winRate
-        }
-      }
-    });
-    
-  } catch (error) {
-    res.status(401).json({ success: false, error: 'Invalid token' });
-  }
-});
-
-// 6. Create Game
+// 4. Game Creation
 app.post('/api/game/create', async (req, res) => {
   try {
-    const { settings = {} } = req.body;
     const token = req.headers.authorization?.replace('Bearer ', '');
     
     if (!token) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
+      return res.status(401).json({ success: false, error: 'Token required' });
     }
     
     const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
@@ -270,6 +389,7 @@ app.post('/api/game/create', async (req, res) => {
         isVIP: user.isVIP,
         color: 'red',
         hasTurn: true,
+        diceValue: null,
         pieces: Array.from({ length: 4 }, (_, i) => ({
           id: i,
           position: -1,
@@ -278,46 +398,58 @@ app.post('/api/game/create', async (req, res) => {
           isFinished: false
         }))
       }],
-      settings: {
-        maxPlayers: settings.maxPlayers || 4,
-        enableVIP: settings.enableVIP !== false
-      }
+      settings: { 
+        maxPlayers: 4, 
+        enableVIP: true,
+        turnTimeLimit: TURN_TIME_LIMIT,
+        autoPlay: true
+      },
+      lastActivity: new Date(),
+      turnTimer: TURN_TIME_LIMIT
     });
     
     await game.save();
     
     res.json({
       success: true,
+      message: 'Game created! 30 seconds per turn.',
       game: {
         id: game._id,
         gameId: game.gameId,
         players: game.players,
         currentTurn: game.currentTurn,
         gameState: game.gameState,
-        settings: game.settings
+        settings: game.settings,
+        timeLimit: TURN_TIME_LIMIT
       }
     });
     
   } catch (error) {
-    console.error('Create game error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 7. Get Active Games
+// 5. Get Active Games
 app.get('/api/game/active', async (req, res) => {
   try {
-    const games = await Game.find({ 
-      gameState: { $in: ['waiting', 'active'] }
-    }).sort({ createdAt: -1 }).limit(10);
+    const games = await Game.find({ gameState: { $in: ['waiting', 'active'] } })
+      .sort({ createdAt: -1 })
+      .limit(10);
     
-    res.json({ success: true, games });
+    // Add time remaining info
+    const gamesWithTime = games.map(game => ({
+      ...game.toObject(),
+      timeRemaining: game.gameState === 'active' ? 
+        Math.max(0, TURN_TIME_LIMIT - Math.floor((Date.now() - game.lastActivity) / 1000)) : null
+    }));
+    
+    res.json({ success: true, games: gamesWithTime });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 8. Get Game State
+// 6. Get Game State with Timer
 app.get('/api/game/state/:gameId', async (req, res) => {
   try {
     const { gameId } = req.params;
@@ -327,7 +459,16 @@ app.get('/api/game/state/:gameId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Game not found' });
     }
     
-    const currentPlayer = game.players[game.currentTurn % game.players.length];
+    const currentPlayer = game.players[game.currentTurn % game.players.length] || game.players[0];
+    
+    // Calculate time remaining
+    const timeElapsed = Math.floor((Date.now() - game.lastActivity) / 1000);
+    const timeRemaining = Math.max(0, TURN_TIME_LIMIT - timeElapsed);
+    
+    // Start timer if game is active and no timer exists
+    if (game.gameState === 'active' && !gameTimers.has(gameId)) {
+      startTurnTimer(gameId);
+    }
     
     res.json({
       success: true,
@@ -344,8 +485,232 @@ app.get('/api/game/state/:gameId', async (req, res) => {
           color: currentPlayer.color
         },
         gameState: game.gameState,
-        winner: game.winner
+        winner: game.winner,
+        settings: game.settings,
+        timeRemaining: timeRemaining,
+        timeLimit: TURN_TIME_LIMIT,
+        urgency: timeRemaining < 10 ? 'hurry' : timeRemaining < 20 ? 'warning' : 'normal'
       }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 7. Roll Dice with Time Check
+app.post('/api/game/roll/:gameId', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Token required' });
+    }
+    
+    const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
+    const user = await User.findById(decoded.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    const game = await Game.findOne({ gameId });
+    
+    if (!game || game.gameState !== 'active') {
+      return res.status(400).json({ success: false, error: 'Game not active' });
+    }
+    
+    const currentPlayer = game.players[game.currentTurn % game.players.length];
+    
+    if (currentPlayer.userId !== user._id.toString()) {
+      return res.status(400).json({ success: false, error: 'Not your turn' });
+    }
+    
+    // Check if time is up
+    const timeElapsed = Math.floor((Date.now() - game.lastActivity) / 1000);
+    if (timeElapsed > MAX_TURN_TIME) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Turn time expired! Auto-playing...',
+        autoPlay: true 
+      });
+    }
+    
+    // Reset timer
+    clearTimer(gameId);
+    startTurnTimer(gameId);
+    
+    // VIP DICE LOGIC
+    let diceValue;
+    let diceType = 'normal';
+    
+    if (user.isVIP) {
+      // VIP gets smart rolls based on game situation
+      const finishedPieces = currentPlayer.pieces.filter(p => p.isFinished).length;
+      const piecesOnBoard = currentPlayer.pieces.filter(p => p.position >= 0 && !p.isFinished).length;
+      
+      if (finishedPieces === 3) {
+        // Need to finish last piece - prioritize high numbers
+        const roll = Math.random();
+        if (roll < 0.5) diceValue = Math.floor(Math.random() * 3) + 4; // 50% chance of 4-6
+        else diceValue = Math.floor(Math.random() * 6) + 1;
+        diceType = 'finishing';
+      } else if (piecesOnBoard === 0) {
+        // Need to get pieces out - prioritize 6
+        const roll = Math.random();
+        if (roll < 0.5) diceValue = 6; // 50% chance of 6
+        else diceValue = Math.floor(Math.random() * 6) + 1;
+        diceType = 'starting';
+      } else {
+        // Normal VIP advantage
+        const roll = Math.random();
+        if (roll < 0.4) diceValue = 6;
+        else if (roll < 0.7) diceValue = Math.floor(Math.random() * 3) + 4;
+        else diceValue = Math.floor(Math.random() * 6) + 1;
+        diceType = 'vip';
+      }
+    } else {
+      // Normal random roll
+      diceValue = Math.floor(Math.random() * 6) + 1;
+    }
+    
+    currentPlayer.diceValue = diceValue;
+    game.lastActivity = new Date();
+    await game.save();
+    
+    // Suggest moves for VIP
+    let suggestedMove = null;
+    if (user.isVIP && diceValue === 6) {
+      const pieceInHome = currentPlayer.pieces.find(p => p.position === -1);
+      if (pieceInHome) {
+        suggestedMove = {
+          pieceId: pieceInHome.id,
+          reason: 'Bring new piece out to increase board presence'
+        };
+      }
+    }
+    
+    res.json({
+      success: true,
+      diceValue,
+      isVIP: user.isVIP,
+      diceType: diceType,
+      timeRemaining: TURN_TIME_LIMIT,
+      suggestedMove: suggestedMove,
+      hurry: timeElapsed > 20,
+      currentPlayer: {
+        userId: currentPlayer.userId,
+        username: currentPlayer.username,
+        displayName: currentPlayer.displayName,
+        color: currentPlayer.color
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 8. Make Move with Speed Bonus
+app.post('/api/game/move/:gameId', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const { pieceId } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Token required' });
+    }
+    
+    const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
+    const user = await User.findById(decoded.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    const game = await Game.findOne({ gameId });
+    
+    if (!game || game.gameState !== 'active') {
+      return res.status(400).json({ success: false, error: 'Game not active' });
+    }
+    
+    const currentPlayer = game.players[game.currentTurn % game.players.length];
+    
+    if (currentPlayer.userId !== user._id.toString()) {
+      return res.status(400).json({ success: false, error: 'Not your turn' });
+    }
+    
+    if (!currentPlayer.diceValue) {
+      return res.status(400).json({ success: false, error: 'Roll dice first' });
+    }
+    
+    // Check move speed
+    const timeElapsed = Math.floor((Date.now() - game.lastActivity) / 1000);
+    const isFastMove = timeElapsed < 5;
+    
+    // Make move
+    const piece = currentPlayer.pieces[pieceId];
+    const fromPosition = piece.position;
+    
+    if (piece.position === -1 && currentPlayer.diceValue === 6) {
+      piece.position = 0;
+      piece.isHome = false;
+    } else if (piece.position >= 0) {
+      piece.position += currentPlayer.diceValue;
+      
+      // Check if finished
+      if (piece.position >= 52) {
+        piece.isFinished = true;
+        piece.position = 100;
+      }
+    }
+    
+    // Clear dice and move to next turn
+    currentPlayer.diceValue = null;
+    
+    // Check for winner
+    const allFinished = currentPlayer.pieces.every(p => p.isFinished);
+    if (allFinished) {
+      game.gameState = 'finished';
+      game.winner = {
+        userId: currentPlayer.userId,
+        username: currentPlayer.username,
+        displayName: currentPlayer.displayName
+      };
+      
+      // Update stats with speed bonus for VIP
+      const winBonus = user.isVIP && isFastMove ? 2 : 1;
+      await User.updateOne(
+        { _id: currentPlayer.userId },
+        { $inc: { totalGames: 1, wins: winBonus } }
+      );
+      
+      clearTimer(gameId);
+    } else {
+      game.currentTurn++;
+      game.lastActivity = new Date();
+      
+      // Reset timer for next player
+      clearTimer(gameId);
+      startTurnTimer(gameId);
+    }
+    
+    await game.save();
+    
+    res.json({
+      success: true,
+      move: {
+        pieceId,
+        fromPosition,
+        toPosition: piece.position,
+        isFinished: piece.isFinished,
+        speed: isFastMove ? 'fast' : 'normal'
+      },
+      gameState: game.gameState,
+      winner: game.winner,
+      speedBonus: isFastMove && user.isVIP ? 'VIP fast move bonus!' : null
     });
     
   } catch (error) {
@@ -360,7 +725,7 @@ app.post('/api/game/join/:gameId', async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     
     if (!token) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
+      return res.status(401).json({ success: false, error: 'Token required' });
     }
     
     const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
@@ -390,6 +755,7 @@ app.post('/api/game/join/:gameId', async (req, res) => {
       isVIP: user.isVIP,
       color: assignedColor,
       hasTurn: false,
+      diceValue: null,
       pieces: Array.from({ length: 4 }, (_, i) => ({
         id: i,
         position: -1,
@@ -399,10 +765,18 @@ app.post('/api/game/join/:gameId', async (req, res) => {
       }))
     });
     
+    // Auto-start if game is full
+    if (game.players.length >= game.settings.maxPlayers) {
+      game.gameState = 'active';
+      startTurnTimer(gameId);
+    }
+    
     await game.save();
     
     res.json({
       success: true,
+      message: game.players.length >= game.settings.maxPlayers ? 
+        'Game full! Starting automatically...' : 'Joined game!',
       game: {
         id: game._id,
         gameId: game.gameId,
@@ -424,7 +798,7 @@ app.post('/api/game/start/:gameId', async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     
     if (!token) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
+      return res.status(401).json({ success: false, error: 'Token required' });
     }
     
     const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
@@ -441,14 +815,24 @@ app.post('/api/game/start/:gameId', async (req, res) => {
     }
     
     if (game.players[0].userId !== user._id.toString()) {
-      return res.status(403).json({ success: false, error: 'Only game creator can start the game' });
+      return res.status(403).json({ success: false, error: 'Only game creator can start' });
+    }
+    
+    if (game.players.length < 2) {
+      return res.status(400).json({ success: false, error: 'Need at least 2 players' });
     }
     
     game.gameState = 'active';
+    game.lastActivity = new Date();
+    
+    // Start timer for first player
+    startTurnTimer(gameId);
+    
     await game.save();
     
     res.json({
       success: true,
+      message: 'Game started! 30 seconds per turn. Auto-play enabled.',
       game: {
         id: game._id,
         gameId: game.gameId,
@@ -463,102 +847,44 @@ app.post('/api/game/start/:gameId', async (req, res) => {
   }
 });
 
-// 11. Roll Dice
-app.post('/api/game/roll/:gameId', async (req, res) => {
+// 11. Clean up inactive games (cron job simulation)
+setInterval(async () => {
   try {
-    const { gameId } = req.params;
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
-    }
-    
-    const decoded = jwt.verify(token, 'super_secret_ludo_key_123');
-    const user = await User.findById(decoded.userId);
-    
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-    
-    const game = await Game.findOne({ gameId });
-    
-    if (!game || game.gameState !== 'active') {
-      return res.status(400).json({ success: false, error: 'Game not active' });
-    }
-    
-    const currentPlayer = game.players[game.currentTurn % game.players.length];
-    
-    if (currentPlayer.userId !== user._id.toString()) {
-      return res.status(400).json({ success: false, error: 'Not your turn' });
-    }
-    
-    // VIP Dice Logic
-    let diceValue;
-    if (currentPlayer.isVIP && game.settings.enableVIP) {
-      // VIP gets better rolls
-      const roll = Math.random();
-      if (roll < 0.4) diceValue = 6; // 40% chance of 6
-      else if (roll < 0.7) diceValue = Math.floor(Math.random() * 3) + 4; // 30% chance of 4-6
-      else diceValue = Math.floor(Math.random() * 6) + 1; // 30% normal roll
-    } else {
-      // Normal random roll
-      diceValue = Math.floor(Math.random() * 6) + 1;
-    }
-    
-    currentPlayer.diceValue = diceValue;
-    await game.save();
-    
-    res.json({
-      success: true,
-      diceValue,
-      currentPlayer: {
-        userId: currentPlayer.userId,
-        username: currentPlayer.username,
-        color: currentPlayer.color
-      }
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const inactiveGames = await Game.find({
+      lastActivity: { $lt: oneHourAgo },
+      gameState: { $in: ['waiting', 'active'] }
     });
     
+    for (const game of inactiveGames) {
+      console.log(`🧹 Cleaning up inactive game: ${game.gameId}`);
+      game.gameState = 'abandoned';
+      await game.save();
+      clearTimer(game.gameId);
+    }
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Cleanup error:', error);
   }
-});
+}, 15 * 60 * 1000); // Every 15 minutes
 
-// Default route
+// Home page
 app.get('/', (req, res) => {
   res.json({
-    message: 'LUDO Game API',
-    version: '1.0.0',
-    endpoints: [
-      'GET  /health',
-      'GET  /api/auth/init',
-      'POST /api/auth/login',
-      'GET  /api/auth/users',
-      'GET  /api/auth/profile',
-      'POST /api/game/create',
-      'GET  /api/game/active',
-      'GET  /api/game/state/:gameId',
-      'POST /api/game/join/:gameId',
-      'POST /api/game/start/:gameId',
-      'POST /api/game/roll/:gameId'
-    ]
-  });
-});
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    error: 'Endpoint not found',
-    path: req.path 
-  });
-});
-
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ 
-    success: false, 
-    error: 'Internal server error' 
+    message: '🎮 FAST-PACED LUDO Game',
+    version: '2.0.0',
+    features: [
+      '⏱️ 30-second turns',
+      '🤖 Auto-play for inactive players',
+      '🎯 VIP smart dice',
+      '⚡ Speed bonuses',
+      '🚀 Fast-paced gameplay'
+    ],
+    timeLimits: {
+      turnTime: TURN_TIME_LIMIT + ' seconds',
+      autoPlay: 'After ' + AUTO_PLAY_DELAY + ' seconds',
+      maxTurnTime: MAX_TURN_TIME + ' seconds'
+    },
+    vipPassword: VIP_PASSWORD
   });
 });
 
@@ -566,13 +892,21 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`
-╔══════════════════════════════════════╗
-║        🎮 LUDO Game Server           ║
-╠══════════════════════════════════════╣
-║ 📡 Port: ${PORT}                          ║
-║ 🌍 CORS: Enabled for all origins     ║
-║ 🗄️  MongoDB: Connected               ║
-║ 📍 API: http://localhost:${PORT}         ║
-╚══════════════════════════════════════╝
+╔════════════════════════════════════════════════════╗
+║              ⚡ FAST LUDO GAME SERVER              ║
+╠════════════════════════════════════════════════════╣
+║ 📡 Port: ${PORT}                                        ║
+║ ⏱️  Turn Time: ${TURN_TIME_LIMIT} seconds                    ║
+║ 🤖 Auto-play: Enabled                              ║
+║ 🎯 VIP Password: "${VIP_PASSWORD}"                  ║
+║ 🚀 Features: Time limits, Speed bonuses, Auto-play ║
+╚════════════════════════════════════════════════════╝
+
+🔥 Game will never be boring:
+• 30-second turns - keeps game fast
+• Auto-play kicks in if player is slow
+• VIP gets smart dice based on situation
+• Speed bonuses for quick moves
+• Games auto-clean after inactivity
   `);
 });
